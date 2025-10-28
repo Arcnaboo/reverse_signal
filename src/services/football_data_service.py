@@ -1,7 +1,7 @@
 import requests
 from datetime import datetime
 from typing import List, Optional
-from models import TeamModel, MatchModel, MatchScore
+from services.models import TeamModel, MatchModel, MatchScore
 
 # ==========================================================
 #  ⚽ API-Football Configuration

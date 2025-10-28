@@ -2,8 +2,8 @@ import os
 import requests
 from dotenv import load_dotenv
 from typing import List
-from models import MatchModel
-from football_data_service import football_service
+from services.models import MatchModel
+from services.football_data_service import football_service
 load_dotenv()
 
 GROQ_API_KEY = "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" #os.getenv("GROQ_API_KEY")
