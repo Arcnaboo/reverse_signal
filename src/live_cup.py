@@ -1,11 +1,14 @@
-# live_cup_events.py
+# live_now.py
 from services.football_data_service import football_service
 
-def live_cup_events():
-    live = football_service.get_live_by_events(league_id=206, max_elapsed=90)
+def main():
+    live = football_service.get_live_today(day="2025-10-29")        # tüm ligler, bugün
+    if not live:
+        print("⏸️  Şu anda events’a göre canlı maç yok.")
+        return
     for m in live:
         print(f"{m.home_team.name}  {m.score.home}-{m.score.away}  "
-              f"{m.away_team.name}   (dakika: {m.status})")
+              f"{m.away_team.name}   (dakika: {m.status})  |  {m.competition}")
 
 if __name__ == "__main__":
-    live_cup_events()
+    main()

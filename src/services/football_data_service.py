@@ -60,21 +60,27 @@ class APIFootballService:
     ) -> List[MatchModel]:
         """
         Fetch fixtures from API-Football v3 /fixtures
-        *  Always returns List[MatchModel]
-        *  Accepts YYYY-MM-DD strings for date filtering
-        *  Handles every documented edge-case (no fixtures, TZ, etc.)
+        * Always returns List[MatchModel]
+        * Accepts YYYY-MM-DD strings for date filtering
+        * Handles every documented edge-case (no fixtures, TZ, etc.)
+        
+        NOTE: You MUST provide 'league_id' or 'team_id' if using
+        'date' or 'from'/'to' filters.
         """
         params: dict[str, str | int] = {"timezone": timezone_str}
+        
+        has_date_filter = any([from_date, to_date])
 
         # --- league + season -------------------------------------------------
         if league_id:
             params["league"] = league_id
-            if not season:  # auto-detect current season for league
+            if not season and not has_date_filter:  # auto-detect current season for league
                 season = next(
                     (L["season"] for L in self.get_leagues() if L["id"] == league_id),
                     datetime.utcnow().year,
                 )
-        if season:
+        if season and not has_date_filter:
+            # Do NOT send 'season' if using a date filter. It conflicts.
             params["season"] = season
 
         # --- date filtering --------------------------------------------------
@@ -87,8 +93,9 @@ class APIFootballService:
         elif to_date:  # today … to_date
             params["from"] = today
             params["to"] = to_date
-        else:  # today only
-            params["date"] = today
+        elif not league_id: # No league, no dates - default to today
+             params["date"] = today
+        # else: no date filter, just league/season
 
         # --- status ----------------------------------------------------------
         params["status"] = status.replace(",", "-")  # docs use dash separator
@@ -199,74 +206,133 @@ class APIFootballService:
                     last_updated=datetime.utcnow(),
                 )
             )
-        print(f"✅  Parsed {len(fixtures)} fixtures.")
+        # Suppress parser spamming for live checks
+        # print(f"✅  Parsed {len(fixtures)} fixtures.")
         return fixtures
     
-# football_data_service.py  içindeki get_live_fixtures() yerine
+    # ----------------------------------------------------------
+    #  *** FIXED LIVE FIXTURES ***
+    # ----------------------------------------------------------
     def get_live_fixtures(
         self,
         *,
-        league_id: Optional[int] = None,
-        live_statuses: str = "1H-2H-HT-ET-P-BT-INT"
+        league_id: Optional[int] = None
     ) -> List[MatchModel]:
         """
-        Türkiye Kupası gibi liglerde "LIVE" etiketi yok;
-        oynanmakta olan maçlar 1H, 2H, HT, ET, P, BT, INT statüleriyle gelir.
+        Pulls all *currently live* fixtures using the correct API parameter.
+        This is the ONLY way to get all live games across all leagues.
+        It will return matches with status 1H, 2H, HT, etc.
         """
-        params: Dict[str, Any] = {
-            "status": live_statuses,
-            "timezone": "UTC"
-        }
+        params: Dict[str, Any] = {"timezone": "UTC"}
+        
         if league_id:
-            params["league"] = league_id
+            # Get live games for one specific league
+            params["live"] = f"{league_id}"
+            print(f"🔴  GET live fixtures for league={league_id}")
+        else:
+            # Get ALL live games from ALL leagues
+            params["live"] = "all"
+            print(f"🔴  GET all live fixtures (live=all)")
 
-        print(f"🔴  GET live fixtures  params={params}")
         r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=params)
         r.raise_for_status()
 
         raw = r.json().get("response", [])
         if not raw:
-            print("⚠️  No live matches right now.")
+            print("⚠️  No 'live=all' matches right now.")
             return []
 
+        # We use your existing V3 parser
         live = self._parse_matches_v3({"response": raw})
-        print(f"🔴  {len(live)} live fixtures parsed.")
+        print(f"🔴  {len(live)} live fixture candidates found.")
         return live
     
-    # football_data_service.py  içine ekle
-def get_live_by_events(
-    self,
-    *,
-    league_id: Optional[int] = None,
-    max_elapsed: int = 90
-) -> List[MatchModel]:
-    """
-    Events’a göre canlı maç:
-    - Bugünün maçlarını çek
-    - events varsa ve son dakika <= max_elapsed ise “canlı” kabul et
-    """
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    candidates = self.get_fixtures(
-        league_id=league_id,
-        from_date=today_str,
-        to_date=today_str,
-        status="NS-TBA-1H-2H-HT-FT-LIVE-TBA"
-    )
-    live = []
-    for m in candidates:
-        ev = requests.get(
-            f"{BASE_URL}/fixtures/events",
-            headers=HEADERS,
-            params={"fixture": m.id}
-        ).json()
-        if not ev.get("response"):
-            continue
-        last = ev["response"][-1]["time"]["elapsed"]
-        if last <= max_elapsed:
-            m.status = f"{last}'"      # dakikayı yaz
-            live.append(m)
-    print(f"🔴  Events’a göre canlı: {len(live)} maç")
-    return live
+
+    def get_live_statistics(self, fixture_id: int) -> List[Dict[str, Any]]:
+        """
+        Bir maçın canlı istatistiklerini (şut, posesyon vb.) çeker.
+        """
+        params = {"fixture": fixture_id}
+        print(f"📊  GET /fixtures/statistics  fixture_id={fixture_id}")
+        
+        try:
+            r = requests.get(f"{BASE_URL}/fixtures/statistics", headers=HEADERS, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json().get("response", [])
+            
+            if not data:
+                print("⚠️  Bu maç için canlı istatistik verisi (henüz) bulunamadı.")
+                return []
+                
+            # İstatistikleri daha temiz bir formata getirelim
+            home_stats = {s['type']: s['value'] for s in data[0].get('statistics', [])}
+            away_stats = {s['type']: s['value'] for s in data[1].get('statistics', [])}
+
+            return [
+                {"team": data[0].get('team', {}).get('name'), "stats": home_stats},
+                {"team": data[1].get('team', {}).get('name'), "stats": away_stats}
+            ]
+            
+        except requests.RequestException as e:
+            print(f"❌  İstatistik alınırken hata: {e}")
+            return []
+    
+    # ----------------------------------------------------------
+    #  *** FIXED LIVE TODAY (USING EVENTS) ***
+    # ----------------------------------------------------------
+    def get_live_today(self, *, league_id: Optional[int] = None,day: Optional[str] = None, max_min: int = 90) -> List[MatchModel]:
+        """
+        Belirtilen gün (day=YYYY-MM-DD) veya bugün canlı maçları events’a göre döndür.
+        Statü etiketine bakmaz → events'a güvenir.
+        
+        FIX: Uses get_live_fixtures() to get candidates, then checks events.
+        """
+        
+        # 1. Get ALL live candidates from the correct endpoint (live=all)
+        # This is the main fix.
+        candidates = self.get_live_fixtures(league_id=league_id)
+        
+        if not candidates:
+            return [] # No live matches at all.
+            
+        live = []
+        # Use the provided 'day' or default to today's date
+        filter_date_str = day or datetime.utcnow().strftime("%Y-%m-%d")
+
+        # 2. Loop and check events, just as you wanted.
+        for m in candidates:
+            
+            # Filter out matches not on the requested day.
+            # This handles matches that started yesterday (e.g., 23:30)
+            if m.utc_date.strftime("%Y-%m-%d") != filter_date_str:
+                continue 
+
+            try:
+                ev = requests.get(
+                    f"{BASE_URL}/fixtures/events",
+                    headers=HEADERS,
+                    params={"fixture": m.id},
+                    timeout=5
+                ).json()
+                
+                if not ev.get("response"):
+                    continue
+                
+                # Safer way to get last minute: find the max elapsed time
+                last_elapsed = 0
+                for event in ev["response"]:
+                    if event.get("time", {}).get("elapsed"):
+                        last_elapsed = max(last_elapsed, event["time"]["elapsed"])
+
+                if last_elapsed > 0 and last_elapsed <= max_min:
+                    m.status = f"{last_elapsed}'"  # Update status with minute
+                    live.append(m)
+            except requests.RequestException as e:
+                print(f"⚠️  Event check failed for fixture {m.id}: {e}")
+                continue
+                    
+        print(f"🔴  Events’a göre canlı: {len(live)} maç")
+        return live
 
 
 football_service = APIFootballService()
