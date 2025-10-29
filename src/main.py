@@ -1,71 +1,39 @@
+# main.py  (overwrite whole file)
 import sys
 from datetime import datetime
 from services.football_data_service import football_service
 from services.llama_football_service import LlamaFootballService
 
-def print_leagues():
-    leagues = football_service.get_leagues()
-    print("\n=== AVAILABLE LEAGUES ===")
-    for l in leagues[:40]:  # limit display
-        print(f"{l['id']:>5} | {l['country']:<15} | {l['name']} ({l['season']})")
-    print(f"Total: {len(leagues)} leagues\n")
+def auto_test():
+    print("🚀  Auto-test: Premier-League fixtures 2025-11-01 → impossible-odds scan\n")
 
-def fetch_fixtures():
-    league_id = input("Enter league ID (e.g. 39 for Premier League): ").strip()
-    from_date = input("From date (YYYY-MM-DD, empty for today): ").strip() or None
-    to_date = input("To date (YYYY-MM-DD, empty for today): ").strip() or None
-
+    # 1. fixed league & date
     fixtures = football_service.get_fixtures(
-        league_id=int(league_id) if league_id else None,
-        from_date=from_date,
-        to_date=to_date
+        league_id=39,
+        from_date="2025-11-01",
+        to_date="2025-11-01"
     )
-
     if not fixtures:
-        print("⚠️  No fixtures found.")
-        return []
+        print("❌  No fixtures returned – abort")
+        sys.exit(1)
 
-    print(f"\n✅ {len(fixtures)} fixtures retrieved:")
-    for idx, m in enumerate(fixtures, 1):
-        print(f"{idx:>2}. {m.home_team.name} vs {m.away_team.name} "
-              f"({m.utc_date.strftime('%Y-%m-%d %H:%M')} | {m.competition})")
-    print()
-    return fixtures
+    # 2. pick first match as focal
+    focal = fixtures[1]
+    print(f"🎯  Focal match: {focal.home_team.name} vs {focal.away_team.name}  "
+          f"({focal.utc_date.strftime('%Y-%m-%d %H:%M')})\n")
 
-def analyze_with_llama(fixtures):
-    confirm = input("Run LLaMA analysis? (y/n): ").strip().lower()
-    if confirm != "y":
-        return
+    # 3. build context bundle
+    context = football_service.build_focal_context(focal, form_length=10)
 
+    # 4. LLaMA call
     llama = LlamaFootballService()
-    print("🧠 Sending data to LLaMA model...\n")
-    result = llama.analyze_matches(fixtures)
-    print("\n=== LLaMA Analysis Result ===")
-    print(result)
-    print("=============================\n")
+    print("🧠  Querying LLaMA for impossible-odds...\n")
+    report = llama.analyze_impossible_odds(context)
 
-def main():
-    print("⚽ ArcFootball CLI Test Tool")
-    print("=============================")
-
-    while True:
-        print("\nOptions:")
-        print("1. List Leagues")
-        print("2. Fetch Fixtures")
-        print("3. Exit")
-
-        choice = input("Select option: ").strip()
-        if choice == "1":
-            print_leagues()
-        elif choice == "2":
-            fixtures = fetch_fixtures()
-            if fixtures:
-                analyze_with_llama(fixtures)
-        elif choice == "3":
-            print("👋 Exiting...")
-            sys.exit(0)
-        else:
-            print("Invalid choice. Try again.")
+    # 5. result
+    print("=== IMPOSSIBLE-ODDS REPORT ===")
+    print(report)
+    print("==============================\n✅  Auto-test complete.")
 
 if __name__ == "__main__":
-    main()
+    auto_test()

@@ -1,168 +1,272 @@
+# football_data_service.py
 import requests
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 from services.models import TeamModel, MatchModel, MatchScore
 
-# ==========================================================
-#  ⚽ API-Football Configuration
-# ==========================================================
-API_KEY = "YOUR_API_FOOTBALL_KEY"
+# === API-Football Configuration (real key) ===
+API_KEY = "1e39976953ae3c962bd228197863962d"
 BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 
 
 class APIFootballService:
     def __init__(self):
-        print("✅ API-Football Service initialized (Pro Plan assumed)")
+        print("✅ API-Football Service initialized (Pro Plan)")
 
-    # ======================================================
-    #  🔹 Get all available leagues
-    # ======================================================
+    # ----------------------------------------------------------
+    #  List all leagues
+    # ----------------------------------------------------------
     def get_leagues(self) -> List[dict]:
-        """Fetch all active leagues and their IDs."""
         url = f"{BASE_URL}/leagues"
         print("📡 Fetching available leagues...")
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        data = response.json()
+        r = requests.get(url, headers=HEADERS)
+        r.raise_for_status()
+        data = r.json()
 
         leagues = []
         for item in data.get("response", []):
-            league_info = item.get("league", {})
-            country_info = item.get("country", {})
+            league = item.get("league", {})
+            country = item.get("country", {})
             seasons = item.get("seasons", [])
-            last_season = seasons[-1]["year"] if seasons else None
-
+            active = None
+            for s in reversed(seasons):
+                if s.get("current") or s.get("coverage", {}).get("fixtures", {}).get("events"):
+                    active = s.get("year")
+                    break
             leagues.append({
-                "id": league_info.get("id"),
-                "name": league_info.get("name"),
-                "country": country_info.get("name"),
-                "type": league_info.get("type"),
-                "season": last_season
+                "id": league.get("id"),
+                "name": league.get("name"),
+                "country": country.get("name"),
+                "season": active,
+                "type": league.get("type")
             })
 
         print(f"✅ Retrieved {len(leagues)} leagues.")
         return leagues
 
-    # ======================================================
-    #  🔹 Get fixtures (today, past, or range)
-    # ======================================================
+    # ----------------------------------------------------------
+    #  Fetch fixtures – fully aligned with latest v3 docs
+    # ----------------------------------------------------------
     def get_fixtures(
         self,
+        *,
         league_id: Optional[int] = None,
+        season: Optional[int] = None,
         from_date: Optional[str] = None,
-        to_date: Optional[str] = None
+        to_date: Optional[str] = None,
+        timezone_str: str = "UTC",
+        status: str = "NS-FT-TBA"
     ) -> List[MatchModel]:
         """
-        Fetch fixtures for any date range (past, present, future).
-        If no dates are provided, defaults to today's date.
+        Fetch fixtures from API-Football v3 /fixtures
+        *  Always returns List[MatchModel]
+        *  Accepts YYYY-MM-DD strings for date filtering
+        *  Handles every documented edge-case (no fixtures, TZ, etc.)
         """
-        params = {}
+        params: dict[str, str | int] = {"timezone": timezone_str}
+
+        # --- league + season -------------------------------------------------
         if league_id:
             params["league"] = league_id
+            if not season:  # auto-detect current season for league
+                season = next(
+                    (L["season"] for L in self.get_leagues() if L["id"] == league_id),
+                    datetime.utcnow().year,
+                )
+        if season:
+            params["season"] = season
 
+        # --- date filtering --------------------------------------------------
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         if from_date and to_date:
             params["from"] = from_date
             params["to"] = to_date
-            label = f"{from_date} → {to_date}"
-        else:
-            today = datetime.utcnow().strftime("%Y-%m-%d")
+        elif from_date:  # single day
+            params["date"] = from_date
+        elif to_date:  # today … to_date
+            params["from"] = today
+            params["to"] = to_date
+        else:  # today only
             params["date"] = today
-            label = today
 
-        print(f"⚽ Fetching fixtures for {label} | League: {league_id or 'All'}")
+        # --- status ----------------------------------------------------------
+        params["status"] = status.replace(",", "-")  # docs use dash separator
 
-        response = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=params)
-        response.raise_for_status()
-        data = response.json()
-        fixtures = self._parse_matches(data)
-        print(f"✅ Loaded {len(fixtures)} fixtures.")
-        return fixtures
+        print(f"⚽  GET /fixtures  params={params}")
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=params)
+        r.raise_for_status()
 
-    # ======================================================
-    #  🔹 Get last N matches for a team
-    # ======================================================
-    def get_team_last_matches(self, team_id: int, limit: int = 10) -> List[MatchModel]:
-        print(f"📈 Fetching last {limit} matches for team {team_id}")
-        response = requests.get(
-            f"{BASE_URL}/fixtures",
-            headers=HEADERS,
-            params={"team": team_id, "last": limit}
-        )
-        response.raise_for_status()
-        return self._parse_matches(response.json())
+        raw = r.json().get("response", [])
+        if not raw:
+            print("❌  No fixtures returned for those filters.")
+            return []
 
-    # ======================================================
-    #  🔹 Get upcoming matches for a team
-    # ======================================================
-    def get_team_upcoming_matches(self, team_id: int, limit: int = 5) -> List[MatchModel]:
-        print(f"📅 Fetching next {limit} matches for team {team_id}")
-        response = requests.get(
-            f"{BASE_URL}/fixtures",
-            headers=HEADERS,
-            params={"team": team_id, "next": limit}
-        )
-        response.raise_for_status()
-        return self._parse_matches(response.json())
+        return self._parse_matches_v3({"response": raw})
 
-    # ======================================================
-    #  🔹 Get all past H2H meetings between two teams
-    # ======================================================
-    def get_head_to_head(self, team_a_id: int, team_b_id: int) -> List[MatchModel]:
-        print(f"🤜🤛 Fetching head-to-head: {team_a_id} vs {team_b_id}")
-        response = requests.get(
-            f"{BASE_URL}/fixtures/headtohead",
-            headers=HEADERS,
-            params={"h2h": f"{team_a_id}-{team_b_id}"}
-        )
-        response.raise_for_status()
-        data = response.json()
-        return self._parse_matches(data)
+    # ----------------------------------------------------------
+    #  NEW: pull finished form for one team
+    # ----------------------------------------------------------
+    def get_team_form(
+        self,
+        *,
+        team_id: int,
+        season: int,
+        last: int = 10,
+        status: str = "FT"
+    ) -> List[MatchModel]:
+        params = {
+            "season": season,
+            "team": team_id,
+            "status": status.replace(",", "-"),
+            "last": last,
+        }
+        print(f"📜  GET team-form  team={team_id}  season={season}  last={last}")
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=params)
+        r.raise_for_status()
+        data = r.json()
+        return self._parse_matches_v3(data)
 
-    # ======================================================
-    #  🧩 Internal parser for all fixture results
-    # ======================================================
-    def _parse_matches(self, data) -> List[MatchModel]:
+    # ----------------------------------------------------------
+    #  NEW: build focal + context bundle
+    # ----------------------------------------------------------
+    def build_focal_context(
+        self,
+        focal: MatchModel,
+        form_length: int = 10
+    ) -> Dict[str, Any]:
+        season = focal.utc_date.year
+
+        home_past = self.get_team_form(team_id=focal.home_team.id, season=season, last=form_length)
+        away_past = self.get_team_form(team_id=focal.away_team.id, season=season, last=form_length)
+
+        # head-to-head last 6
+        h2h_params = {
+            "season": season,
+            "h2h": f"{focal.home_team.id}-{focal.away_team.id}",
+            "status": "FT",
+            "last": 6,
+        }
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=h2h_params)
+        r.raise_for_status()
+        h2h = self._parse_matches_v3(r.json())
+
+        return {
+            "focal": focal.dict(),
+            "home_form": [m.dict() for m in home_past],
+            "away_form": [m.dict() for m in away_past],
+            "h2h": [m.dict() for m in h2h],
+        }
+
+    # ----------------------------------------------------------
+    #  v3-compatible parser
+    # ----------------------------------------------------------
+    def _parse_matches_v3(self, data) -> List[MatchModel]:
         fixtures = []
-        for item in data.get("response", []):
-            fixture = item.get("fixture", {})
-            league = item.get("league", {})
-            teams = item.get("teams", {})
-            goals = item.get("goals", {})
+        for fix in data.get("response", []):
+            fx = fix.get("fixture", {})
+            league = fix.get("league", {})
+            teams = fix.get("teams", {})
+            goals = fix.get("goals", {})
 
             home = TeamModel(
                 id=teams.get("home", {}).get("id", 0),
-                name=teams.get("home", {}).get("name", "Unknown Home")
+                name=teams.get("home", {}).get("name", "Home"),
             )
             away = TeamModel(
                 id=teams.get("away", {}).get("id", 0),
-                name=teams.get("away", {}).get("name", "Unknown Away")
+                name=teams.get("away", {}).get("name", "Away"),
             )
-
             score = MatchScore(
-                home=goals.get("home"),
-                away=goals.get("away")
+                home=goals.get("home"), away=goals.get("away")
             )
 
-            match = MatchModel(
-                id=fixture.get("id", 0),
-                utc_date=datetime.fromisoformat(
-                    fixture.get("date", datetime.utcnow().isoformat()).replace("Z", "+00:00")
-                ),
-                status=fixture.get("status", {}).get("short", "NS"),
-                competition=league.get("name", "Unknown League"),
-                home_team=home,
-                away_team=away,
-                score=score,
-                stage=league.get("round"),
-                group=None,
-                last_updated=datetime.utcnow()
+            utc_date = datetime.fromisoformat(
+                fx.get("date", datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")
             )
-            fixtures.append(match)
+
+            fixtures.append(
+                MatchModel(
+                    id=fx.get("id", 0),
+                    utc_date=utc_date,
+                    status=fx.get("status", {}).get("short", "NS"),
+                    competition=league.get("name", "Unknown League"),
+                    home_team=home,
+                    away_team=away,
+                    score=score,
+                    stage=league.get("round"),
+                    group=None,
+                    last_updated=datetime.utcnow(),
+                )
+            )
+        print(f"✅  Parsed {len(fixtures)} fixtures.")
         return fixtures
+    
+# football_data_service.py  içindeki get_live_fixtures() yerine
+    def get_live_fixtures(
+        self,
+        *,
+        league_id: Optional[int] = None,
+        live_statuses: str = "1H-2H-HT-ET-P-BT-INT"
+    ) -> List[MatchModel]:
+        """
+        Türkiye Kupası gibi liglerde "LIVE" etiketi yok;
+        oynanmakta olan maçlar 1H, 2H, HT, ET, P, BT, INT statüleriyle gelir.
+        """
+        params: Dict[str, Any] = {
+            "status": live_statuses,
+            "timezone": "UTC"
+        }
+        if league_id:
+            params["league"] = league_id
+
+        print(f"🔴  GET live fixtures  params={params}")
+        r = requests.get(f"{BASE_URL}/fixtures", headers=HEADERS, params=params)
+        r.raise_for_status()
+
+        raw = r.json().get("response", [])
+        if not raw:
+            print("⚠️  No live matches right now.")
+            return []
+
+        live = self._parse_matches_v3({"response": raw})
+        print(f"🔴  {len(live)} live fixtures parsed.")
+        return live
+    
+    # football_data_service.py  içine ekle
+def get_live_by_events(
+    self,
+    *,
+    league_id: Optional[int] = None,
+    max_elapsed: int = 90
+) -> List[MatchModel]:
+    """
+    Events’a göre canlı maç:
+    - Bugünün maçlarını çek
+    - events varsa ve son dakika <= max_elapsed ise “canlı” kabul et
+    """
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    candidates = self.get_fixtures(
+        league_id=league_id,
+        from_date=today_str,
+        to_date=today_str,
+        status="NS-TBA-1H-2H-HT-FT-LIVE-TBA"
+    )
+    live = []
+    for m in candidates:
+        ev = requests.get(
+            f"{BASE_URL}/fixtures/events",
+            headers=HEADERS,
+            params={"fixture": m.id}
+        ).json()
+        if not ev.get("response"):
+            continue
+        last = ev["response"][-1]["time"]["elapsed"]
+        if last <= max_elapsed:
+            m.status = f"{last}'"      # dakikayı yaz
+            live.append(m)
+    print(f"🔴  Events’a göre canlı: {len(live)} maç")
+    return live
 
 
-# ==========================================================
-#  Export ready-to-use service instance
-# ==========================================================
 football_service = APIFootballService()
