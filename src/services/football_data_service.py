@@ -1,11 +1,12 @@
 # football_data_service.py
+import os
 import requests
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from services.models import TeamModel, MatchModel, MatchScore
 
 # === API-Football Configuration (real key) ===
-API_KEY = "1e39976953ae3c962bd228197863962d"
+API_KEY = os.getenv("API_FOOTBALL_KEY")
 BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {"x-apisports-key": API_KEY}
 

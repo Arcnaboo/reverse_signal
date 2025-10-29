@@ -9,7 +9,7 @@ from services.football_data_service import football_service
 
 load_dotenv()
 
-GROQ_API_KEY = "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"  # replace via env in prod
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 HEADERS = {
